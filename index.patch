@@ -1,0 +1,27 @@
+--- a/index.html
++++ b/index.html
+@@ -686,6 +686,7 @@
+ .pw-flt input[type=search]{border:1px solid var(--line);border-radius:8px;padding:6px 10px;font-size:12.5px;font-family:inherit;min-width:180px;flex:1}
+ 
+ </style>
++<link rel="stylesheet" href="factory.css">
+ </head>
+ <body>
+ <div class="layout">
+@@ -1602,7 +1603,7 @@
+     <!-- ============ P4 AI 内容工厂（分平台） ============ -->
+     <section class="panel" id="p4">
+       <div class="topbar">
+-        <div><h2>内容工厂 · 成稿线</h2><div class="sub">抖音 / 小红书 / 视频号 / 公众号：选题 → 一键成稿（分镜 + 口播 + SRT + 排版稿）→ 送审 → 门店本地化 → 排期</div></div>
++        <div><h2>内容工厂 · 视频生产线</h2><div class="sub">抖音 / 小红书 / 视频号 / 公众号：选题 → 一键成稿（分镜 + 口播 + SRT + 排版稿）→ 送审 → 门店本地化 → 排期</div></div>
+         <div class="stamp" id="genStamp">尚未生成</div>
+       </div>
+ 
+@@ -6909,6 +6910,7 @@
+ setPort('sales');
+ document.getElementById('distDate').value = new Date().toISOString().slice(0,10);
+ </script>
++<script src="factory.js"></script>
+ </body>
+ </html>
+ 
