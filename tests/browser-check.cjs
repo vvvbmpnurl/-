@@ -14,13 +14,24 @@ const assert=require('node:assert/strict');
   await page.waitForSelector('#cfJobs',{state:'attached'});
   await page.evaluate(()=>{setPort('media');document.querySelector('#nav [data-p="p4"]').click();});
   assert.match(await page.locator('#cfWorkspace').innerText(),/未配置/);
-  assert(await page.locator('[data-action="create"]').isDisabled());
+  assert(await page.locator('#cfProvider option[value="wan"]').isDisabled());
+  assert(!await page.locator('[data-action="create"]').isDisabled());
   // Create existing copy through the original UI, then verify import into video workflow.
   await page.evaluate(()=>{curPlat='dy';renderTopics();document.querySelectorAll('.tbox').forEach((x,i)=>x.checked=i===0);genOutputs();});
   await page.waitForFunction(()=>document.querySelector('#cfSource').options.length>1,{},{timeout:10000});
   await page.locator('#cfSource').selectOption({index:1});
   assert((await page.locator('#cfTitle').inputValue()).length>0);
   assert((await page.locator('#cfScript').inputValue()).length>0);
+  await page.locator('#cfProvider').selectOption('xiaoyunque');
+  await page.locator('[data-action="create"]').click();
+  await page.waitForSelector('.cf-import-url');
+  const downloadPromise=page.waitForEvent('download');
+  await page.locator('[data-action="script"]').click();
+  assert((await downloadPromise).suggestedFilename().endsWith('.txt'));
+  await page.locator('.cf-import-url').fill('https://cdn.example/manual.mp4');
+  await page.locator('[data-action="import"]').click();
+  await page.waitForSelector('.cf-watched');
+  assert.match(await page.locator('#cfJobs').innerText(),/剪映·小云雀/);
   const demo={id:'demo',title:'审核示例',script:'口播稿',provider:'domestic',status:'ready',created:Date.now()/1000,video_url:'https://example.com/video.mp4',review:null};
   const fake={csrf:'test',jobs:[demo],deliveries:[],accounts:[{id:'a',name:'门店A',platform:'dy'}],providers:[{id:'domestic',name:'国内数字人',ready:true}],publish_ready:true};
   await page.route('**/api/factory/**',async route=>{
@@ -48,6 +59,6 @@ const assert=require('node:assert/strict');
   const dims=await page.locator('#cfWorkspace').evaluate(el=>({client:el.clientWidth,scroll:el.scrollWidth}));
   assert(dims.scroll<=dims.client+1,JSON.stringify(dims));
   assert.deepEqual(errors,[]);
-  console.log('Browser checks passed: original-topic import, config gating, review gate, distribution receipt, responsive workspace, no JS errors.');
+  console.log('Browser checks passed: original-topic import, domestic tool catalog, manual handoff/download/import, config gating, review gate, distribution receipt, responsive workspace, no JS errors.');
  } finally {if(browser)await browser.close();service.kill();}
 })().catch(err=>{console.error(err);process.exitCode=1;});

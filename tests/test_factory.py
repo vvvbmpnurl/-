@@ -113,6 +113,44 @@ class FactoryTests(unittest.TestCase):
         app.persist('deliveries',d); app.init_db()
         self.assertEqual(app.rows('deliveries')[0]['status'],'unknown')
 
+    def test_shanjian_official_api(self):
+        config=dict(SHANJIAN_API_KEY='private-key', SHANJIAN_AVATAR_ID='avatar1', SHANJIAN_SPEAKER_ID='voice1', AIGC_CONTENT_PRODUCER='本公司')
+        with patch.dict(os.environ,config):
+            with patch.object(app,'remote',return_value={'code':'0','data':{'taskId':'sj1'}}) as request:
+                j=app.create_job(dict(title='闪剪口播',script='完整的选题口播稿',provider='shanjian'))
+                args=request.call_args.args
+                self.assertEqual(args[1],'https://openapi.shanjian.tv/v1/virtualman/video')
+                self.assertEqual(args[3]['text'],'完整的选题口播稿')
+                self.assertEqual(args[3]['speakerId'],'voice1')
+                self.assertEqual(json.loads(args[3]['metadata']['AIGC'])['Label'],'1')
+                self.assertNotIn('audioUrl',args[3])
+            with patch.object(app,'remote',return_value={'data':{'status':'succeed','result':{'videoUrl':'https://cdn.example/sj.mp4'}}}):
+                self.assertEqual(app.refresh_job(j['id'])['status'],'ready')
+            with self.assertRaises(app.Problem):
+                app.create_job(dict(title='a',script='稿'*3601,provider='shanjian'))
+
+    def test_manual_handoff_import_and_review_reset(self):
+        for tool in app.MANUAL_IDS:
+            with patch.object(app,'remote') as request:
+                j=app.create_job(dict(provider=tool,title='选题标题',script='选题口播稿',srt='字幕'))
+                self.assertEqual(j['status'],'awaiting_upload')
+                self.assertEqual(j['srt'],'字幕')
+                request.assert_not_called()
+            with self.assertRaises(app.Problem): app.review_job(j['id'],dict(decision='approved',watched=True))
+            with self.assertRaises(app.Problem): app.publish(j['id'],dict(accounts=['a']))
+            with self.assertRaises(app.Problem): app.import_video(j['id'],dict(video_url='javascript:alert(1)'))
+            imported=app.import_video(j['id'],dict(video_url='https://cdn.example/manual.mp4'))
+            self.assertEqual(imported['status'],'ready')
+            self.assertIsNone(imported['review'])
+            app.review_job(j['id'],dict(decision='approved',watched=True))
+            with self.assertRaises(app.Problem): app.import_video(j['id'],dict(video_url='https://cdn.example/changed.mp4'))
+
+    def test_publication_tools_cannot_be_used_as_video_providers(self):
+        for tool in ('yixiaoer','yimei','invented-provider'):
+            with patch.object(app,'remote') as request:
+                with self.assertRaises(app.Problem): app.create_job(dict(title='a',script='b',provider=tool))
+                request.assert_not_called()
+
     def test_http_security_and_static_allowlist(self):
         service=app.ThreadingHTTPServer(('127.0.0.1',0), app.Handler)
         thread=threading.Thread(target=service.serve_forever,daemon=True);thread.start()

@@ -11,6 +11,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
 from urllib.parse import urlparse, quote
+from tools_catalog import TOOLS, MANUAL_IDS
 
 ROOT = Path(__file__).resolve().parent
 DB = Path(os.environ.get('FACTORY_DB', str(ROOT / 'data/factory.db')))
@@ -82,6 +83,10 @@ def accounts():
         raise Problem('服务端 PUBLISH_ACCOUNTS 配置无效') from None
 
 def provider_ready(provider):
+    if provider in MANUAL_IDS:
+        return True
+    if provider == 'shanjian':
+        return all(os.environ.get(k) for k in ('SHANJIAN_API_KEY', 'SHANJIAN_AVATAR_ID', 'SHANJIAN_SPEAKER_ID', 'AIGC_CONTENT_PRODUCER'))
     if provider == 'domestic':
         return bool(os.environ.get('AVATAR_GATEWAY_URL') and os.environ.get('AVATAR_GATEWAY_TOKEN'))
     if provider == 'heygen':
@@ -98,11 +103,25 @@ def create_job(data):
     script = str(data.get('script', '')).strip()
     if not title or not script or len(title) > 200 or len(script) > 5000:
         raise Problem('请填写标题和制作稿（标题 ≤200 字，制作稿 ≤5000 字）')
+    if provider == 'shanjian' and not 3 <= len(script) <= 3600:
+        raise Problem('闪剪数字人口播稿需为 3–3600 字符')
     job = dict(id=uuid.uuid4().hex, title=title, script=script, provider=provider,
                source=str(data.get('source', ''))[:200], status='creating', created=time.time(), video_url='', review=None)
+    if provider in MANUAL_IDS:
+        job['status'] = 'awaiting_upload'
+        job['production_mode'] = 'manual'
+        job['srt'] = str(data.get('srt', ''))[:20000]
+        persist('jobs', job)
+        return job
     persist('jobs', job)
     try:
-        if provider == 'domestic':
+        if provider == 'shanjian':
+            result = remote('POST', 'https://openapi.shanjian.tv/v1/virtualman/video', os.environ['SHANJIAN_API_KEY'], {
+                'virtualmanId': os.environ['SHANJIAN_AVATAR_ID'], 'speakerId': os.environ['SHANJIAN_SPEAKER_ID'],
+                'text': script, 'speakerExtra': {'speedRatio': 1, 'language': 'zh-CN'},
+                'metadata': {'AIGC': json.dumps({'Label': '1', 'ContentProducer': os.environ['AIGC_CONTENT_PRODUCER'], 'ProduceID': job['id']}, ensure_ascii=False)}})
+            ident = (result.get('data') or {}).get('taskId')
+        elif provider == 'domestic':
             base = https_url(os.environ['AVATAR_GATEWAY_URL'].rstrip('/'))
             result = remote('POST', base + '/videos', os.environ['AVATAR_GATEWAY_TOKEN'], {
                 'script': script, 'title': title, 'aspect_ratio': '9:16', 'ai_generated': True,
@@ -133,7 +152,12 @@ def refresh_job(ident):
     job = get_job(ident)
     if job['status'] != 'processing':
         return job
-    if job['provider'] == 'domestic':
+    if job['provider'] == 'shanjian':
+        result = remote('GET', 'https://openapi.shanjian.tv/v1/task/info?taskId=' + quote(job['remote_id'], safe=''), os.environ['SHANJIAN_API_KEY'])
+        out = result.get('data') or {}
+        status, url = out.get('status'), (out.get('result') or {}).get('videoUrl')
+        done, failed = status == 'succeed', status == 'failed'
+    elif job['provider'] == 'domestic':
         base = https_url(os.environ['AVATAR_GATEWAY_URL'].rstrip('/'))
         out = remote('GET', base + '/videos/' + quote(job['remote_id'], safe=''), os.environ['AVATAR_GATEWAY_TOKEN'])
         status, url = out.get('status'), out.get('video_url')
@@ -156,6 +180,18 @@ def refresh_job(ident):
         job.update(status='failed', error='平台制作失败，请到平台控制台查看详情')
     persist('jobs', job)
     return job
+
+def import_video(ident, data):
+    job = get_job(ident)
+    if job['status'] != 'awaiting_upload' or job['provider'] not in MANUAL_IDS:
+        raise Problem('仅等待手动制作的任务可回传成片；更换视频请新建版本并重新审核')
+    url = https_url(str(data.get('video_url', '')).strip())
+    if len(url) > 4000:
+        raise Problem('视频链接过长')
+    job.update(status='ready', video_url=url, review=None)
+    persist('jobs', job)
+    return job
+
 
 def review_job(ident, data):
     job = get_job(ident)
@@ -269,9 +305,8 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 with LOCK:
                     return self.respond(200, dict(csrf=TOKEN, jobs=rows('jobs'), deliveries=rows('deliveries'), accounts=accounts(),
-                        providers=[dict(id='domestic', name='国内数字人 · 待确认具体平台', ready=provider_ready('domestic')),
-                                   dict(id='wan', name='阿里万相 · AI 空镜（5秒，无口播）', ready=provider_ready('wan')),
-                                   dict(id='heygen', name='HeyGen · 数字人口播', ready=provider_ready('heygen'))],
+                        tools=TOOLS,
+                        providers=[dict(id=t['id'], name=t['name'], mode=t['mode'], note=t['note'], ready=provider_ready(t['id'])) for t in TOOLS if t['category'] != '批量分发'],
                         publish_ready=bool(os.environ.get('PUBLISH_GATEWAY_URL') and os.environ.get('PUBLISH_GATEWAY_TOKEN'))))
             except Problem as exc:
                 return self.respond(400, {'error': str(exc)})
@@ -294,6 +329,7 @@ class Handler(BaseHTTPRequestHandler):
                 elif len(parts) == 5 and parts[:3] == ['api', 'factory', 'jobs']:
                     ident, action = parts[3:]
                     if action == 'refresh': result = refresh_job(ident)
+                    elif action == 'import': result = import_video(ident, data)
                     elif action == 'review': result = review_job(ident, data)
                     elif action == 'publish': result = publish(ident, data)
                     else: raise Problem('接口不存在')
