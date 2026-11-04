@@ -275,6 +275,21 @@ def refresh_delivery(ident):
     persist('deliveries', item)
     return item
 
+def server_settings():
+    """Public mode is only supported behind the authenticated TLS proxy."""
+    origin = os.environ.get('FACTORY_PUBLIC_ORIGIN', '').rstrip('/')
+    bind = os.environ.get('FACTORY_BIND', '127.0.0.1')
+    token = os.environ.get('FACTORY_PROXY_TOKEN', '')
+    if origin:
+        parsed = urlparse(origin)
+        if (parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password
+                or parsed.path or parsed.query or parsed.fragment or len(token) < 32):
+            raise Problem('服务器模式需配置纯 HTTPS 站点地址及至少32字符的代理令牌')
+    elif bind not in ('127.0.0.1', 'localhost', '::1'):
+        raise Problem('非本机监听必须启用受保护的 HTTPS 代理模式')
+    return origin, bind, token
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *_):
         pass
@@ -291,11 +306,19 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def valid_host(self):
+        origin, _, token = server_settings()
+        if origin:
+            supplied = self.headers.get('X-Factory-Proxy', '')
+            return (self.headers.get('Host') == urlparse(origin).netloc
+                    and secrets.compare_digest(supplied, token))
         return self.headers.get('Host') in (f'127.0.0.1:{self.server.server_port}', f'localhost:{self.server.server_port}')
+
+    def expected_origin(self):
+        return server_settings()[0] or 'http://' + self.headers.get('Host', '')
 
     def do_GET(self):
         if not self.valid_host():
-            return self.respond(403, {'error': '仅支持本机访问'})
+            return self.respond(403, {'error': '访问入口校验失败'})
         path = urlparse(self.path).path
         if path in ('/', '/index.html', '/factory.js', '/factory.css'):
             name = 'index.html' if path == '/' else path[1:]
@@ -313,8 +336,8 @@ class Handler(BaseHTTPRequestHandler):
         self.respond(404, {'error': '接口不存在'})
 
     def do_POST(self):
-        if not self.valid_host() or self.headers.get('X-Factory-CSRF') != TOKEN or self.headers.get('Origin') != 'http://' + self.headers.get('Host', ''):
-            return self.respond(403, {'error': '请求来源校验失败，请从本机工作台操作'})
+        if not self.valid_host() or self.headers.get('X-Factory-CSRF') != TOKEN or self.headers.get('Origin') != self.expected_origin():
+            return self.respond(403, {'error': '请求来源校验失败，请从工作台入口操作'})
         try:
             length = int(self.headers.get('Content-Length', 0))
             if length < 0 or length > 65536:
@@ -344,7 +367,8 @@ class Handler(BaseHTTPRequestHandler):
             self.respond(500, {'error': '服务处理失败，请检查本机服务日志和配置'})
 
 if __name__ == '__main__':
+    origin, bind, _ = server_settings()
     init_db()
     port = int(os.environ.get('FACTORY_PORT', '8765'))
-    print(f'内容工厂已启动：http://127.0.0.1:{port} （仅限本机）', flush=True)
-    ThreadingHTTPServer(('127.0.0.1', port), Handler).serve_forever()
+    print(f'内容工厂已启动：{origin or f"http://127.0.0.1:{port}"}', flush=True)
+    ThreadingHTTPServer((bind, port), Handler).serve_forever()

@@ -151,6 +151,36 @@ class FactoryTests(unittest.TestCase):
                 with self.assertRaises(app.Problem): app.create_job(dict(title='a',script='b',provider=tool))
                 request.assert_not_called()
 
+    def test_server_mode_fails_closed(self):
+        with patch.dict(os.environ,{'FACTORY_BIND':'0.0.0.0'}):
+            with self.assertRaises(app.Problem): app.server_settings()
+        for origin in ('http://factory.example', 'https://factory.example/path', 'https://user:pass@factory.example'):
+            with patch.dict(os.environ,{'FACTORY_PUBLIC_ORIGIN':origin,'FACTORY_PROXY_TOKEN':'x'*48}):
+                with self.assertRaises(app.Problem): app.server_settings()
+        with patch.dict(os.environ,{'FACTORY_PUBLIC_ORIGIN':'https://factory.example','FACTORY_PROXY_TOKEN':'short'}):
+            with self.assertRaises(app.Problem): app.server_settings()
+
+    def test_https_proxy_host_token_and_origin(self):
+        with patch.dict(os.environ,{'FACTORY_PUBLIC_ORIGIN':'https://factory.example','FACTORY_PROXY_TOKEN':'x'*48}):
+            service=app.ThreadingHTTPServer(('127.0.0.1',0),app.Handler)
+            thread=threading.Thread(target=service.serve_forever,daemon=True);thread.start()
+            base=f'http://127.0.0.1:{service.server_port}'
+            headers={'Host':'factory.example','X-Factory-Proxy':'x'*48}
+            try:
+                for bad in ({'Host':'factory.example'},dict(headers,Host='evil.example')):
+                    with self.assertRaises(HTTPError) as error: urlopen(Request(base+'/api/factory/state',headers=bad))
+                    self.assertEqual(error.exception.code,403)
+                state=json.load(urlopen(Request(base+'/api/factory/state',headers=headers)))
+                for origin in ('http://factory.example','https://evil.example'):
+                    bad=dict(headers,Origin=origin,**{'X-Factory-CSRF':state['csrf']})
+                    with self.assertRaises(HTTPError) as error: urlopen(Request(base+'/api/factory/jobs',data=b'{}',headers=bad))
+                    self.assertEqual(error.exception.code,403)
+                good=dict(headers,Origin='https://factory.example',**{'X-Factory-CSRF':state['csrf']})
+                data=json.dumps(dict(title='服务器测试',script='口播稿',provider='jianying')).encode()
+                self.assertEqual(json.load(urlopen(Request(base+'/api/factory/jobs',data=data,headers=good)))['status'],'awaiting_upload')
+            finally:
+                service.shutdown();service.server_close();thread.join()
+
     def test_http_security_and_static_allowlist(self):
         service=app.ThreadingHTTPServer(('127.0.0.1',0), app.Handler)
         thread=threading.Thread(target=service.serve_forever,daemon=True);thread.start()
