@@ -1,0 +1,17 @@
+{$FACTORY_DOMAIN} {
+    basic_auth {
+        {$FACTORY_ADMIN_USER} {$FACTORY_ADMIN_PASSWORD_HASH}
+    }
+    header {
+        Strict-Transport-Security "max-age=31536000"
+        X-Content-Type-Options nosniff
+        X-Frame-Options DENY
+        Referrer-Policy same-origin
+    }
+    request_body {
+        max_size 64KB
+    }
+    reverse_proxy factory:8765 {
+        header_up X-Factory-Proxy {$FACTORY_PROXY_TOKEN}
+    }
+}

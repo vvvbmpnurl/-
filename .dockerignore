@@ -1,0 +1,8 @@
+*
+!Dockerfile
+!index.html
+!factory.js
+!factory.css
+!server.py
+!tools_catalog.py
+!install.py
