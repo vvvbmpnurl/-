@@ -14,6 +14,12 @@ class MacLauncherTests(unittest.TestCase):
         self.assertNotIn('FACTORY_PUBLIC_ORIGIN',env)
         self.assertNotIn('FACTORY_PROXY_TOKEN',env)
 
+    def test_mac_system_certificate_fallback_preserves_explicit_setting(self):
+        with patch.object(mac.sys,'platform','darwin'), patch.object(mac.Path,'is_file',return_value=True), patch.dict(os.environ,{},clear=True):
+            self.assertEqual(mac.local_environment({},8765)['SSL_CERT_FILE'],'/etc/ssl/cert.pem')
+            with patch.dict(os.environ,{'SSL_CERT_FILE':'/custom/ca.pem'}):
+                self.assertEqual(mac.local_environment({},8765)['SSL_CERT_FILE'],'/custom/ca.pem')
+
     def test_config_allowlist(self):
         with tempfile.TemporaryDirectory() as directory:
             p=Path(directory)/'config.json'

@@ -61,6 +61,8 @@ def configure():
 def local_environment(config, port):
     env = os.environ.copy()
     env.update(config)
+    if sys.platform == 'darwin' and not env.get('SSL_CERT_FILE') and Path('/etc/ssl/cert.pem').is_file():
+        env['SSL_CERT_FILE'] = '/etc/ssl/cert.pem'
     # Always launch local mode even if a previous server deployment exported these.
     env.update(FACTORY_BIND='127.0.0.1', FACTORY_PORT=str(port), FACTORY_DB=str(ROOT / 'data/factory.db'))
     env.pop('FACTORY_PUBLIC_ORIGIN', None)

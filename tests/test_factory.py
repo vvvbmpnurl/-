@@ -151,6 +151,34 @@ class FactoryTests(unittest.TestCase):
                 with self.assertRaises(app.Problem): app.create_job(dict(title='a',script='b',provider=tool))
                 request.assert_not_called()
 
+    def test_missing_task_id_preserves_redacted_business_error(self):
+        config=dict(SHANJIAN_API_KEY='private-test-credential', SHANJIAN_AVATAR_ID='a', SHANJIAN_SPEAKER_ID='s', AIGC_CONTENT_PRODUCER='本公司')
+        response={'code':'RESOURCE_DENIED','message':'资源权限不足 token=hidden-token Key private-test-credential','debug':{'api_key':'must-not-return'}}
+        with patch.dict(os.environ,config), patch.object(app,'remote',return_value=response):
+            j=app.create_job(dict(title='测试',script='测试口播文案',provider='shanjian'))
+        self.assertEqual(j['status'],'unknown')
+        self.assertIn('RESOURCE_DENIED',j['error'])
+        self.assertIn('资源权限不足',j['error'])
+        for secret in ('private-test-credential','hidden-token','must-not-return'):
+            self.assertNotIn(secret,j['error'])
+
+    def test_remote_ssl_error_is_specific(self):
+        import ssl
+        from urllib.error import URLError
+        with patch.object(app,'urlopen',side_effect=URLError(ssl.SSLCertVerificationError(1,'certificate verify failed'))):
+            with self.assertRaisesRegex(app.Problem,'证书验证失败'):
+                app.remote('GET','https://example.com','key')
+
+    def test_http_error_does_not_echo_raw_upstream_body(self):
+        import io
+        error=HTTPError('https://example.com',403,'Forbidden',{},io.BytesIO(json.dumps({'code':'DENIED','message':'余额不足','headers':{'Authorization':'secret'}}).encode()))
+        with patch.object(app,'urlopen',side_effect=error):
+            with self.assertRaises(app.Problem) as result:
+                app.remote('GET','https://example.com','secret')
+        self.assertIn('余额不足',str(result.exception))
+        self.assertNotIn('Authorization',str(result.exception))
+        self.assertNotIn('secret',str(result.exception))
+
     def test_server_mode_fails_closed(self):
         with patch.dict(os.environ,{'FACTORY_BIND':'0.0.0.0'}):
             with self.assertRaises(app.Problem): app.server_settings()

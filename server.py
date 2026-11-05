@@ -2,6 +2,9 @@
 import json
 import os
 import secrets
+import re
+import ssl
+import socket
 import sqlite3
 import threading
 import time
@@ -9,7 +12,7 @@ import uuid
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.request import Request, urlopen
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse, quote
 from tools_catalog import TOOLS, MANUAL_IDS
 
@@ -21,6 +24,29 @@ TOKEN = secrets.token_urlsafe(32)
 class Problem(Exception):
     pass
 
+def safe_platform_detail(result):
+    """Expose only bounded diagnostic fields, never full upstream bodies."""
+    if not isinstance(result, dict):
+        return ''
+    parts = []
+    for name, label in (('code', '错误码'), ('message', '平台提示'), ('requestId', '请求编号')):
+        value = result.get(name)
+        if not isinstance(value, (str, int)) or isinstance(value, bool):
+            continue
+        value = str(value)[:2000]
+        for key, secret in os.environ.items():
+            if secret and any(mark in key.upper() for mark in ('KEY', 'TOKEN', 'SECRET', 'PASSWORD')):
+                value = value.replace(secret, '[已隐藏]')
+        value = re.sub(r'https?://[^\s<>"\']+', '[链接已隐藏]', value)
+        value = re.sub(r'(?i)(bearer\s+)[^\s,;]+', r'\1[已隐藏]', value)
+        value = re.sub(r'(?i)((?:api[-_ ]?key|token|secret|password|authorization)[\s"\']*[:=][\s"\']*)[^\s,;"\']+', r'\1[已隐藏]', value)
+        value = re.sub(r'[A-Za-z0-9_\-]{32,}', '[长标识已隐藏]', value)
+        value = ' '.join(value.split())[:400]
+        if value:
+            parts.append(f'{label}：{value}')
+    return '；'.join(parts)
+
+
 def remote(method, url, key, body=None, header='Authorization', extra=None):
     headers = {header: ('Bearer ' + key if header == 'Authorization' else key), 'Content-Type': 'application/json'}
     headers.update(extra or {})
@@ -29,10 +55,21 @@ def remote(method, url, key, body=None, header='Authorization', extra=None):
         with urlopen(req, timeout=45) as response:
             return json.load(response)
     except HTTPError as exc:
-        # Never expose upstream response bodies: they may contain credentials.
-        raise Problem(f'平台接口返回 HTTP {exc.code}，请检查服务端配置或平台控制台') from None
-    except Exception:
-        raise Problem('平台请求超时或连接失败；请查询平台任务记录后再操作') from None
+        detail = ''
+        try:
+            detail = safe_platform_detail(json.loads(exc.read(16384)))
+        except Exception:
+            pass
+        raise Problem(f'平台接口返回 HTTP {exc.code}' + ('；' + detail if detail else '，请检查平台权限和配置')) from None
+    except (ssl.SSLCertVerificationError, URLError) as exc:
+        reason = getattr(exc, 'reason', exc)
+        if isinstance(reason, ssl.SSLCertVerificationError):
+            raise Problem('HTTPS证书验证失败；Mac请使用新版启动脚本加载系统证书，不能关闭证书验证') from None
+        raise Problem('平台连接失败；请检查本机网络和代理，并核对平台任务记录后再操作') from None
+    except (TimeoutError, socket.timeout):
+        raise Problem('平台请求超时；请查询平台任务记录后再操作') from None
+    except (ValueError, UnicodeError):
+        raise Problem('平台响应不是有效JSON；结果待核实，请勿重复提交') from None
 
 def init_db():
     DB.parent.mkdir(parents=True, exist_ok=True)
@@ -140,7 +177,8 @@ def create_job(data):
                 'parameters': {'size': '720*1280', 'duration': 5}}, extra={'X-DashScope-Async': 'enable'})
             ident = (result.get('output') or {}).get('task_id')
         if not ident:
-            job.update(status='unknown', error='平台未返回任务编号，请到平台核对后处理')
+            detail = safe_platform_detail(result)
+            job.update(status='unknown', error='平台未返回任务编号' + ('；' + detail if detail else '，响应中无可显示的错误原因') + '。请先核对平台记录，不要重复提交')
         else:
             job.update(status='processing', remote_id=ident)
     except Problem as exc:
